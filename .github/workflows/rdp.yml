@@ -1,0 +1,115 @@
+name: RDP 2026
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_authkey:
+        description: "Tailscale Auth key"
+        required: true
+      cycles:
+        description: "Number of cycles (reserved for future use)"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  full:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      RDP_USER: MasumHub
+      RDP_PASS: Masum2017
+      MAIN_RUNTIME_MIN: 360
+
+    steps:
+      - name: Show runner info
+        shell: pwsh
+        run: |
+          whoami
+          systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
+          Write-Host "Runner ready for RDP setup"
+
+      # ---------------- TAILSCALE ----------------
+      - name: Install and Configure Tailscale
+        shell: pwsh
+        run: |
+          $tsDir = "$env:ProgramFiles\Tailscale"
+          $exe = "$tsDir\tailscale.exe"
+
+          if (-not (Test-Path $exe)) {
+            Write-Host "Installing Tailscale..."
+            Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" `
+              -OutFile "tailscale.msi"
+            Start-Process msiexec.exe -ArgumentList "/i tailscale.msi /quiet /norestart" -Wait
+            Start-Sleep -Seconds 8
+          }
+
+          Write-Host "Starting Tailscale service..."
+          Start-Service Tailscale -ErrorAction SilentlyContinue
+
+          Write-Host "Connecting to Tailscale..."
+          & $exe up --authkey "${{ inputs.ts_authkey }}" --hostname "bullet" --accept-routes --reset
+
+          # Wait and get IP
+          $ip = $null
+          for ($i = 0; $i -lt 15; $i++) {
+            $ip = & $exe ip -4 | Select-Object -First 1
+            if ($ip) { break }
+            Start-Sleep -Seconds 3
+          }
+
+          if (-not $ip) {
+            throw "Failed to get Tailscale IP after 45 seconds"
+          }
+
+          echo "TS_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "✅ Tailscale connected successfully"
+          Write-Host "Tailscale IP: $ip"
+
+      # ---------------- RDP ----------------
+      - name: Enable RDP and Create User
+        shell: pwsh
+        run: |
+          $sec = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
+
+          if (-not (Get-LocalUser $env:RDP_USER -ErrorAction SilentlyContinue)) {
+            Write-Host "Creating user $env:RDP_USER"
+            New-LocalUser $env:RDP_USER -Password $sec -FullName "RDP User" -Description "GitHub Runner RDP"
+            Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
+          } else {
+            Write-Host "User already exists, updating password"
+            Set-LocalUser -Name $env:RDP_USER -Password $sec
+          }
+
+          # Enable RDP
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" -Value 0
+
+          # Allow RDP through firewall
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+
+          Write-Host "✅ RDP enabled for user: $env:RDP_USER"
+
+      # ---------------- KEEP ALIVE ----------------
+      - name: Keep Runner Alive
+        shell: pwsh
+        run: |
+          $minutes = [int]$env:MAIN_RUNTIME_MIN
+          Write-Host "Keeping runner alive for $minutes minutes..."
+          Start-Sleep -Seconds ($minutes * 60)
+
+      - name: Final Status
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host "✅ Workflow completed successfully!"
+          Write-Host "RDP User     : $env:RDP_USER"
+          Write-Host "RDP Password : $env:RDP_PASS"
+          Write-Host "Tailscale IP : $env:TS_IP"
+          Write-Host "Connect via RDP to: $env:TS_IP"
+          Write-Host "======================================"
