@@ -6,10 +6,6 @@ on:
       ts_authkey:
         description: "Tailscale Auth key"
         required: true
-      cycles:
-        description: "Number of cycles (reserved for future use)"
-        required: false
-        default: "1"
 
 permissions:
   contents: read
@@ -31,85 +27,76 @@ jobs:
         run: |
           whoami
           systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
-          Write-Host "Runner ready for RDP setup"
 
       # ---------------- TAILSCALE ----------------
       - name: Install and Configure Tailscale
         shell: pwsh
         run: |
-          $tsDir = "$env:ProgramFiles\Tailscale"
-          $exe = "$tsDir\tailscale.exe"
-
+          $exe = "$env:ProgramFiles\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
-            Write-Host "Installing Tailscale..."
-            Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" `
-              -OutFile "tailscale.msi"
+            Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "tailscale.msi"
             Start-Process msiexec.exe -ArgumentList "/i tailscale.msi /quiet /norestart" -Wait
-            Start-Sleep -Seconds 8
+            Start-Sleep -Seconds 10
           }
-
-          Write-Host "Starting Tailscale service..."
           Start-Service Tailscale -ErrorAction SilentlyContinue
-
-          Write-Host "Connecting to Tailscale..."
           & $exe up --authkey "${{ inputs.ts_authkey }}" --hostname "bullet" --accept-routes --reset
 
-          # Wait and get IP
           $ip = $null
-          for ($i = 0; $i -lt 15; $i++) {
+          for ($i = 0; $i -lt 20; $i++) {
             $ip = & $exe ip -4 | Select-Object -First 1
             if ($ip) { break }
             Start-Sleep -Seconds 3
           }
-
-          if (-not $ip) {
-            throw "Failed to get Tailscale IP after 45 seconds"
-          }
+          if (-not $ip) { throw "Tailscale IP not found" }
 
           echo "TS_IP=$ip" >> $env:GITHUB_ENV
-          Write-Host "✅ Tailscale connected successfully"
           Write-Host "Tailscale IP: $ip"
 
-      # ---------------- RDP ----------------
-      - name: Enable RDP and Create User
+      # ---------------- RDP USER SETUP ----------------
+      - name: Create RDP User and Configure
         shell: pwsh
         run: |
-          $sec = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
+          $User = $env:RDP_USER
+          $Pass = $env:RDP_PASS
 
-          if (-not (Get-LocalUser $env:RDP_USER -ErrorAction SilentlyContinue)) {
-            Write-Host "Creating user $env:RDP_USER"
-            New-LocalUser $env:RDP_USER -Password $sec -FullName "RDP User" -Description "GitHub Runner RDP"
-            Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
+          $sec = ConvertTo-SecureString $Pass -AsPlainText -Force
+
+          if (-not (Get-LocalUser $User -ErrorAction SilentlyContinue)) {
+            New-LocalUser $User -Password $sec -FullName "RDP User" -Description "GitHub RDP"
+            Add-LocalGroupMember -Group "Administrators" -Member $User
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $User
+            Write-Host "New user created: $User"
           } else {
-            Write-Host "User already exists, updating password"
-            Set-LocalUser -Name $env:RDP_USER -Password $sec
+            Set-LocalUser -Name $User -Password $sec
+            Write-Host "User password updated"
           }
 
           # Enable RDP
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          # Allow RDP through firewall
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          # Important: Allow multiple sessions + reset existing sessions
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0
 
-          Write-Host "✅ RDP enabled for user: $env:RDP_USER"
+          Write-Host "RDP User: $User"
+          Write-Host "RDP Password: $Pass"
 
       # ---------------- KEEP ALIVE ----------------
       - name: Keep Runner Alive
         shell: pwsh
         run: |
-          $minutes = [int]$env:MAIN_RUNTIME_MIN
-          Write-Host "Keeping runner alive for $minutes minutes..."
-          Start-Sleep -Seconds ($minutes * 60)
+          Write-Host "Keeping session alive for 6 hours..."
+          Start-Sleep -Seconds 21600
 
-      - name: Final Status
+      - name: Final Connection Info
         shell: pwsh
         run: |
           Write-Host "======================================"
-          Write-Host "✅ Workflow completed successfully!"
-          Write-Host "RDP User     : $env:RDP_USER"
-          Write-Host "RDP Password : $env:RDP_PASS"
-          Write-Host "Tailscale IP : $env:TS_IP"
-          Write-Host "Connect via RDP to: $env:TS_IP"
+          Write-Host "✅ SETUP COMPLETED!"
+          Write-Host "RDP Username : $($env:RDP_USER)"
+          Write-Host "RDP Password : $($env:RDP_PASS)"
+          Write-Host "Tailscale IP : $($env:TS_IP)"
+          Write-Host ""
+          Write-Host "Connect using RDP to: $($env:TS_IP)"
+          Write-Host "Use username: MasumHub"
           Write-Host "======================================"
